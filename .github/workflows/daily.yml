@@ -43,7 +43,7 @@ jobs:
           STAMP=$(date -u -d '+8 hours' +%Y-%m-%d)
           cp output/gld_monitor_report.md  "reports/${STAMP}.md" || true
           cp output/gld_monitor_oi.png     "reports/${STAMP}.png" || true
-          git add reports
+          git add reports state.json
           if git diff --cached --quiet; then
             echo "nothing to commit"
           else
