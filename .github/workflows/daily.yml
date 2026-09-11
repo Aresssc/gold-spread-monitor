@@ -1,0 +1,52 @@
+name: GLD option monitor daily
+
+on:
+  schedule:
+    # UTC 13:30 Mon-Fri = Beijing 21:30 (US pre-open)
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch: {}   # manual trigger button
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        run: python gld_option_monitor.py --plot --json --csv
+
+      - name: Email report
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ secrets.MAIL_TO }}
+        run: python notify_email.py
+
+      - name: Commit report snapshot
+        run: |
+          git config user.name  "gld-bot"
+          git config user.email "actions@github.com"
+          mkdir -p reports
+          STAMP=$(date -u -d '+8 hours' +%Y-%m-%d)
+          cp output/gld_monitor_report.md  "reports/${STAMP}.md" || true
+          cp output/gld_monitor_oi.png     "reports/${STAMP}.png" || true
+          git add reports
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "daily report ${STAMP} (spot $(python -c "import json;print(round(json.load(open('output/gld_monitor_data.json'))['spot'],2))"))"
+            git push
+          fi
