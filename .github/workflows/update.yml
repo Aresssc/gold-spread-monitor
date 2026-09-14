@@ -6,7 +6,12 @@ on:
     - cron: "10 1-6 * * 1-5"
     # 夜盘：北京时间 21:10-次日02:10 每小时（UTC 13:10-18:10，周日至周五）
     - cron: "10 13-18 * * 0-5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "忽略交易时段守卫，强制更新并部署"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -31,6 +36,8 @@ jobs:
 
       - name: Run pipeline (session-guarded)
         id: run
+        env:
+          FORCE_RUN: ${{ inputs.force == true && '1' || '0' }}
         run: |
           OUT=$(python3 gold_spread_monitor.py) || true
           echo "$OUT"
