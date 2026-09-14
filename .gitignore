@@ -1,0 +1,7 @@
+outputs/gold_spread_5min_2*.html
+outputs/gold_spread_2*.html
+data5m/au_sina.json
+data5m/gc_em.json
+data5m/cnh_em.json
+__pycache__/
+*.pyc

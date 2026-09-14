@@ -1,0 +1,72 @@
+name: gold-spread-update
+
+on:
+  schedule:
+    # 日盘：北京时间 09:10-14:10 每小时（UTC 01:10-06:10，周一至周五）
+    - cron: "10 1-6 * * 1-5"
+    # 夜盘：北京时间 21:10-次日02:10 每小时（UTC 13:10-18:10，周日至周五）
+    - cron: "10 13-18 * * 0-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: gold-spread
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run pipeline (session-guarded)
+        id: run
+        run: |
+          OUT=$(python3 gold_spread_monitor.py) || true
+          echo "$OUT"
+          if echo "$OUT" | grep -q "OUT_OF_SESSION"; then
+            echo "沪金非交易时段（或节假日）：本次跳过数据更新"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 gold_spread_5min.py || true
+          python3 paper_tracker.py || true
+
+      - name: Refresh site pages
+        if: steps.run.outputs.skip != 'true'
+        run: |
+          cp outputs/gold_spread_latest.html site/index.html
+          cp outputs/gold_spread_5min.html site/micro.html
+          [ -f outputs/gold_spread_strategy.html ] && cp outputs/gold_spread_strategy.html site/strategy.html
+          cp outputs/gold_spread_latest.json site/latest.json || true
+          cp outputs/gold_spread_5min.json site/micro.json || true
+
+      - name: Commit data archive
+        if: steps.run.outputs.skip != 'true'
+        run: |
+          git config user.name "Aresssc"
+          git config user.email "914364304@qq.com"
+          git add -A
+          git commit -m "data update $(date '+%F %T %Z')" || echo "no changes"
+          git push
+
+      - uses: actions/configure-pages@v5
+        if: steps.run.outputs.skip != 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.run.outputs.skip != 'true'
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4
+        if: steps.run.outputs.skip != 'true'

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="y6aP6BXbQCsHJKozIjAegq"><head data-page-node-id="590ptsEnDTfqrjmciaRndq"><meta charset="utf-8" data-page-node-id="ZHMnlew6K9w4YDXzW0rJC2">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="hqD57Rmz69pNf4t52QQ4Fo">
+<title>黄金境内外价差·均值回归策略</title>
+<style>
+  body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f5f6f8;color:#1a1a2e;margin:0;padding:20px;}
+  .card{background:#fff;border-radius:12px;padding:18px 22px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+  h1{font-size:20px;margin:0 0 4px;} h2{font-size:15px;margin:0 0 10px;}
+  .sub{color:#888;font-size:12px;margin-bottom:12px;}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0;}
+  td,th{padding:7px 10px;border-bottom:1px solid #eee;text-align:left;}
+  th{color:#666;font-weight:600;background:#fafbfc;}
+  .hl{background:#fff8e6;}
+  .warn{background:#fde8e8;color:#c0392b;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.7;}
+  .ok{background:#e8f5ee;color:#1e7d4e;padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.7;}
+  .note{font-size:12px;color:#888;line-height:1.8;}
+  .kv{display:inline-block;background:#f8f9fb;border-radius:8px;padding:6px 12px;margin:3px 6px 3px 0;font-size:13px;}
+</style></head><body data-page-node-id="1MjIyeRFIf9I0ucJ66jGOR">
+<h1 data-page-node-id="YDs7whWl4DLZqdT2UB6sNE">🎯 黄金境内外价差·均值回归策略</h1>
+<div class="sub" data-page-node-id="TUrFEkP7IXbAmsmXXU96af">数据：近5年日线（1300样本）+ 3日平滑（滤除收盘错位噪声）· 回测成本已含保证金利息 · 生成于 2026-09-09</div>
+
+<div class="card" data-page-node-id="YUX5nE9vj4Tuu5J4JScR5Z">
+<h2 data-page-node-id="VRsM2M0jUfNdsCGzHWtrJh">一、策略原理与关键统计</h2>
+<div class="kv" data-page-node-id="MOoax14PzsGZLvAOWWG2Tq">现货对半衰期 ≈ 3.8 交易日</div><div class="kv" data-page-node-id="NG1Bqm3KFEWnaV5qp63Wud">期货对半衰期 ≈ 4.7 交易日</div><div class="kv" data-page-node-id="rjJq4wETZAdDzEv5u1lhIH">回归一轮通常 1~2 周</div>
+<p class="note" style="margin-top:10px" data-page-node-id="etmMrtdaN0fhOTCD9832YV">价差呈显著均值回归（AR1 系数 0.83~0.86），偏离均值后约一周回归一半。注意：日线原始序列的"半衰期0.5天"是收盘错位噪声，不可交易；本策略所有参数均基于平滑序列（同刻口径的代理）。保证金利息成本极低（950元/克名义 × 10% × 6%年化 ≈ 0.016 元/克/天，持仓两周仅 0.22 元/克），<b data-page-node-id="bOBDl3OXMxZL6P6XXiJTCL">真正的约束是时间与极端风险，不是资金成本</b>。</p>
+</div>
+
+<div class="card" data-page-node-id="f2ujuBZnHlN2vuBdCFewYZ">
+<h2 data-page-node-id="KZp40oc5cPy1UqMBQy4Nzt">二、开仓点位（推荐参数，历史胜率 91~95%）</h2>
+<table data-page-node-id="S4gbCQOZIFmtfsdf8JzaKz">
+<tr data-page-node-id="5sgq1lv7Bhj1up057BYmyl"><th data-page-node-id="sBTlWpLIS0ix1sAWeZLgKz">方向</th><th data-page-node-id="4Q6DqvkbooqijvMR3uhr7r">触发条件（3日平滑价差）</th><th data-page-node-id="X7GMF6tt3SvcFKSqd4dPLM">止盈</th><th data-page-node-id="tO9i5uAdEELpq5mL9jwlL8">止损</th><th data-page-node-id="FLx8AMXgLHox1KuKIkIGnm">最长持有</th><th data-page-node-id="dlBCUSG6ncAAHOGpRMtkhq">历史胜率</th><th data-page-node-id="RjsNT0wPL88KOxGronyFma">平均持仓</th><th data-page-node-id="EaouGihyPHeXalPmez782P">平均盈亏</th></tr>
+<tr class="hl" data-page-node-id="gO7jietu5y9PLfdKCjsrsp"><td data-page-node-id="ONVpLLZDfD5KLWoBMs0OX9"><b data-page-node-id="U4OZU5aocK9AEBTkEUjGbw">做空价差</b><br data-page-node-id="XxZEtBCIcstchFSAovPTys">（赌境内溢价走窄）</td><td data-page-node-id="yxvFa98Y9oxZ1bpEDsVc0F">现货对 ≥ 近2年 p80（<b data-page-node-id="Q3ZptfwaLbQjWVPPD847BT">≈7.3 元/克</b>）<br data-page-node-id="DiPhbFtzrgyIvNlZCh3evL">期货对 ≥ 近2年 p80（<b data-page-node-id="nuB7JBu9HEAyuYcDu6kot5">≈5.8 元/克</b>）</td><td data-page-node-id="AQRTJ8cbYdaNEe9Abadc3H">回归半程<br data-page-node-id="zsya1TE0qE3x4QwDVA8aRX">（约 2~4 元/克）</td><td data-page-node-id="3wDj5WLUyOiEQZsYrjKXB4">12 元/克<br data-page-node-id="Iz80Ft9bHOTYvLCzKXFGOp">（再走扩即砍）</td><td data-page-node-id="RXQWV8VlxBQznhMgHbQYj7">60 交易日</td><td data-page-node-id="MLFKjN24r1TvfhZWR0Sp8V">现货 94.4%<br data-page-node-id="th8WOp6euCcJPVZkL29X0a">期货 91.1%</td><td data-page-node-id="1pJrt32qhjH6C9JjEPLl28">6~7 天</td><td data-page-node-id="D5IDwD1C80Ard8tKRl4F3d">+5.6~6.1 元/克</td></tr>
+<tr data-page-node-id="qA2SWZrQd9CYoGGO8Rt8NZ"><td data-page-node-id="uudtyTVyCvJhklTglCNUOK"><b data-page-node-id="4cwKVce5tHjG6Jijo5K4OJ">做多价差</b><br data-page-node-id="4qYCtwSEOA4H7z4H9bDHCs">（赌价差走扩）</td><td data-page-node-id="w9hL12ghEoAFHDp7M93U48">现货对 ≤ 近2年 p20（<b data-page-node-id="X33R5gzFksyu0buN0dEsml">≈-0.8 元/克</b>）<br data-page-node-id="VwMSdokJsXfb1NYWL13j33">期货对 ≤ 近2年 p20（<b data-page-node-id="U3zamWW6EhX8NnCQvRthex">≈-2.7 元/克</b>）</td><td data-page-node-id="dyuklF12rOSWlUbVbH423z">回归半程</td><td data-page-node-id="4hzypNLIeo2xtp28q7bdBu">12 元/克</td><td data-page-node-id="0H88iNn7iYaHEbScxgtC0F">60 交易日</td><td data-page-node-id="nMt2LneLjPLb6fXFUhESWw">≈91%</td><td data-page-node-id="CPp2AxoSZDZZPsBdPo0EsT">6 天</td><td data-page-node-id="2BnVeUfkaUqMahx4pO0nan">+5.1 元/克</td></tr>
+<tr data-page-node-id="eVAtpKkBNnRovdxgCZfePJ"><td data-page-node-id="URxVMKhOUWtAN3KDzXUnl2">保守变体<br data-page-node-id="qGvChDuvO376PDgwu1qkwW">（胜率↑盈亏比↓）</td><td data-page-node-id="BdgIDT4BJi5niDySv0rueo">≥ p85（较 p80 再上一个台阶）</td><td data-page-node-id="rLT9P8UrzNCN2vik1CqwML">固定 3 元/克</td><td data-page-node-id="EaivKYvK7go9nMZZWTLCbK">12 元/克</td><td data-page-node-id="iKWzkVXRAo9Szca04CNngJ">60 日</td><td data-page-node-id="4AA29WJPxUeA3FC18vihPj">≈94%</td><td data-page-node-id="vY9tCfYtt7QSF234ROANtE">6~7 天</td><td data-page-node-id="dEeHlnOldXTpYmVD4mtKam">+5.9 元/克</td></tr>
+</table>
+<p class="note" data-page-node-id="VSgzzAAY29q8XaQ8t4uawt">若你想把胜率精确控制在 75~80% 以换取更好的盈亏比：把止损收紧到 5~6 元/克，胜率降至约 75~80%，单次亏损减半——胜率和赔率是同一枚硬币的两面，回测里 90%+ 胜率的代价是 1:4 的盈亏比（赢3亏12）。期望值各组合均为正（+4.8~+6.5 元/克/次）。</p>
+</div>
+
+<div class="card" data-page-node-id="afQ99MGyUuWr4EKW3BVgiH">
+<h2 data-page-node-id="ttzdOydUg1Z0NiXtg1G3NZ">三、当前状态与观察点位（2026-09-09 收盘）</h2>
+<div class="ok" data-page-node-id="6PF2boNsTmQhTOsbDCrWu5">现货对：平滑价差 6.89，已在近2年 p80 触发线（4.87）之上——<b data-page-node-id="Yr9mZZUWn9ZxxUxkvE7Kzy">处于做空价差的触发区间</b>，待下一个同刻快照确认后开纸面仓（买境外+卖境内）。原始价差 11.85 中的错位噪声不作为触发依据。</div>
+<p style="margin:10px 0 0" class="note" data-page-node-id="NP8Y1omAUmM7fFSCSP3x8H">期货对：平滑价差 -1.99（中性），收盘口径价差 3.83 略高于触发线 3.70——两口径信号不一致，以明日同刻快照为准。观察位：同刻价差上破 3.70 做空价差 / 下破 -8.7 做多价差。<br>注：触发线按滚动500日（近2年）分位逐日更新，与回测入场口径一致；此前版本报告中的 5.8/7.3 为5年全样本分位，偏保守，已修正。</p>
+</div>
+
+<div class="card" data-page-node-id="wXkRrXZDRbOus8GfdWR4ce">
+<h2 data-page-node-id="v9jXX9acMomyA728iNiBoz">四、执行与风控清单</h2>
+<table data-page-node-id="XXgxPnwd5hz0U1PHfrjv2Y">
+<tr data-page-node-id="y8ZlOB2NQA4pQubfxhcdnI"><th data-page-node-id="ivZHheliKRU22L3eNMQzPR">项</th><th data-page-node-id="UrwBaAnmTwaBfI3tTypj4T">要点</th></tr>
+<tr data-page-node-id="Jq84UuqhFWpx1hKB2rKWi4"><td data-page-node-id="KIrrRwcfLdrVhDZL3KmCXG">入场执行</td><td data-page-node-id="SunDxba3oJdHxxpywAFXpQ">用监控的<b data-page-node-id="vUgM1xvQyzQisBBPzp1BC1">同刻快照</b>确认（工作日 9-14 点每小时推送），勿用收盘错位价下单；两腿尽量同时成交</td></tr>
+<tr data-page-node-id="oLyfD0IvLpywaOqEFey5Mn"><td data-page-node-id="TqH2vbigjQB7usdQtPFhZK">仓位</td><td data-page-node-id="YmEeXqZctqsmoq7BZii4Z3">单次信号保证金占用 ≤ 账户 30%；价差两腿各 10% 保证金，实际双边合计约 20% 名义</td></tr>
+<tr data-page-node-id="pqjA8Nvn1bq6Y6yJWeFmzX"><td data-page-node-id="JGuZ1DIZIX3warCkLgqMjR">资金成本</td><td data-page-node-id="RWNbmU5YXRZddY1dtkcjgv">持仓 60 天上限时利息成本约 0.94 元/克（占平均盈利的 17%），已计入回测盈亏</td></tr>
+<tr data-page-node-id="r6mBwwpOIC8wwFYglTgtHe"><td data-page-node-id="eRPPFUCCLCdIz3Yur7t1Qg">换月</td><td data-page-node-id="QdaFGIO6dvwoOHoHw5fQFl">期货对每月两腿换月（有基差摩擦）；现货对无换月，实盘境内腿可用 Au(T+D) 替代（有递延费）</td></tr>
+<tr data-page-node-id="jv3Rp8QivqMSwAI32M6xF4"><td data-page-node-id="IPigbMOjlbxprjHdr9cf5X">汇率</td><td data-page-node-id="LHQi9CxmCRLzr6Gpges6w9">USDCNY 大幅波动直接冲击价差，境外腿盈利/亏损含汇率敞口；可用远期锁汇对冲本金部分</td></tr>
+</table>
+<div class="warn" style="margin-top:10px" data-page-node-id="pnVyLuV1IwiJqOi8EGEVPH"><b data-page-node-id="uDVoPM1YnYcrTNOJn1LQXN">三个必须知道的尾部风险：</b>① 止损 12 元/克在5年内很少被打到，但 2020 式进口受限行情下境内溢价曾到 30 元+，极端情况会连续止损——这就是"高胜率、低赔率"策略的亏损集中模式；② 境外腿夜盘时段无法止损，隔夜跳空可能直接击穿 12 元止损位；③ 历史胜率≠未来胜率，境内外价差结构受进口政策/汇率制度影响，可能发生机制切换。建议先以 1/4 仓位跑 1~2 个月实盘验证滑点后再放大。</div>
+</div>
+
+<div class="card" data-page-node-id="MstdfBP1AbwcrCrQNH1VUM">
+<h2 data-page-node-id="o7b4ZlQB6xuSkIy2B1vilL">五、方法备忘</h2>
+<p class="note" data-page-node-id="gxkRc0TVGKYas5T2EitGFs">信号：滚动500日分位（与监控报告同口径）；序列做3日平滑以近似同刻信号；止盈"回归半程"= 入场点与滚动均值的中点；回测非重叠持仓；成本 = 名义×10%保证金×6%年化×持仓天数。回测脚本：strategy_backtest.py / strategy_backtest_smooth.py（工作区根目录），参数矩阵与结果详见 outputs/strategy_backtest.json。</p>
+</div>
+</body></html>
