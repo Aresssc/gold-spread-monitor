@@ -79,12 +79,12 @@ def fetch_au0_5m():
 
 
 def _fetch_em_5m(secid, cache_name):
-    """东方财富 5 分钟（f51 时间, f52 开, f53 收, f54 高, f55 低, f56 量）"""
+    """东方财富 5 分钟（f51 时间, f52 开, f53 收, f54 高, f55 低, f56 量）
+    注意：end 参数按"不含当日"语义处理，必须用未来日期才能取到今天的 K 线。"""
     beg = (datetime.date.today() - datetime.timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
-    end = datetime.date.today().strftime("%Y%m%d")
     url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
            f"&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56"
-           f"&klt=5&fqt=0&beg={beg}&end={end}&lmt=10000")
+           f"&klt=5&fqt=0&beg={beg}&end=20500101&lmt=10000")
     t = _get(url, "https://quote.eastmoney.com/", tries=3, wait=10)
     if t:
         try:
@@ -112,6 +112,65 @@ def fetch_gc_5m():
 
 def fetch_cnh_5m():
     return _fetch_em_5m("133.USDCNH", "cnh_em.json")
+
+
+def merge_bars(*lists):
+    """多源 K 线按时间并集去重；时间相同的以后面传入的源为准（新源优先）"""
+    out = {}
+    for bars in lists:
+        for b in bars or []:
+            t = b["t"][:16]
+            out[t] = {"t": t, "c": float(b["c"])}
+    return sorted(out.values(), key=lambda x: x["t"])
+
+
+def fetch_gc_sina_1m():
+    """新浪 GC 当日 1 分钟分时（GlobalFuturesService.getGlobalFuturesMinLine）。
+    行格式两种：首行 [date, 昨结, 'cme', '', time, price, 0, 0, avg, ts]，
+    后续 [time, price, 0, 0, avg, ts]。取末位完整时间戳与对应最新价。"""
+    url = ("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_=/"
+           "GlobalFuturesService.getGlobalFuturesMinLine?symbol=GC")
+    t = _get(url, "https://finance.sina.com.cn", timeout=25, tries=2, wait=4)
+    if not t or "minLine_1d" not in t:
+        return []
+    try:
+        j = json.loads(t[t.index("({") + 1:t.rindex(")")])
+        rows = j.get("minLine_1d") or []
+    except Exception:
+        return []
+    bars = []
+    for r in rows:
+        try:
+            ts = r[-1]                       # 'YYYY-MM-DD HH:MM:SS'
+            px = float(r[5]) if len(r) >= 10 else float(r[1])
+            if px > 100:
+                bars.append({"t": ts, "c": px})
+        except (ValueError, IndexError):
+            continue
+    return bars
+
+
+def fetch_cnh_sina_5m():
+    """新浪离岸 USDCNH 5 分钟 K 线（NewForexService.getMinKLine，symbol=fx_susdcnh）"""
+    url = ("https://stock2.finance.sina.com.cn/forex/api/jsonp.php/var%20_=/"
+           "NewForexService.getMinKLine?symbol=fx_susdcnh&scale=5&datalen=1023")
+    t = _get(url, "https://finance.sina.com.cn", timeout=25, tries=2, wait=4)
+    if not t or '"d"' not in t:
+        return []
+    try:
+        arr = json.loads(t[t.index("(") + 1:t.rindex(")")])
+    except Exception:
+        return []
+    return [{"t": x["d"], "c": float(x["c"])} for x in arr if x.get("c")]
+
+
+def _parse_bar_t(t):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------- 交易时段守卫
@@ -187,9 +246,9 @@ def classify(dt):
 
 # ---------------------------------------------------------------- 对齐
 def align(au_bars, gc_bars, fx_bars, tol_gc=10, tol_fx=20):
-    au = sorted([(datetime.datetime.strptime(b["t"], "%Y-%m-%d %H:%M:%S"), b["c"]) for b in au_bars])
-    gc = sorted([(datetime.datetime.strptime(b["t"], "%Y-%m-%d %H:%M"), b["c"]) for b in gc_bars])
-    fx = sorted([(datetime.datetime.strptime(b["t"], "%Y-%m-%d %H:%M"), b["c"]) for b in fx_bars])
+    au = sorted([(_parse_bar_t(b["t"]), b["c"]) for b in au_bars if _parse_bar_t(b["t"])])
+    gc = sorted([(_parse_bar_t(b["t"]), b["c"]) for b in gc_bars if _parse_bar_t(b["t"])])
+    fx = sorted([(_parse_bar_t(b["t"]), b["c"]) for b in fx_bars if _parse_bar_t(b["t"])])
 
     def last_le(series, t, tol):
         lo, hi = 0, len(series) - 1
@@ -487,10 +546,12 @@ def build_html(stats, meta, note):
     窗口：<b>{meta['window_start']} ~ {meta['window_end']}</b>（{meta['days']} 个交易日，{meta['bars']} 根境内样本）·
     口径：<b>5 分钟同刻对齐</b><br>
     境内 沪金主力 au0（元/克）｜境外 COMEX GC ÷ 31.1035 × 汇率｜汇率 <b>离岸 USDCNH</b>（在岸 5 分钟无免费历史，以离岸替代）<br>
-    样本仅含境内期货可交易时段：日盘 09:00-10:15 / 10:30-11:30 / 13:30-15:00，夜盘 21:00-02:30
+    样本仅含境内期货可交易时段：日盘 09:00-10:15 / 10:30-11:30 / 13:30-15:00，夜盘 21:00-02:30<br>
+    <b>数据截至 {stats['cur']['t']}</b>（生成时距 {meta.get('stale_min', '-')} 分钟）· GC 源 {meta.get('gc_src', '-')} · CNH 源 {meta.get('fx_src', '-')}
+    {'<span class="badge b-mid">⚠️ 数据滞后，请以实时三腿面板核对</span>' if meta.get('stale_min', 0) > 40 else ''}
   </div>
   <div class="stats">
-    <div class="stat"><div class="k">当前价差</div><div class="v">{cur['spread']:+.2f} 元/克</div></div>
+    <div class="stat"><div class="k">当前价差（截至 {stats['cur']['t'][5:]}）</div><div class="v">{cur['spread']:+.2f} 元/克</div></div>
     <div class="stat"><div class="k">样本均值</div><div class="v">{d['mean']:+.2f} 元/克</div></div>
     <div class="stat"><div class="k">标准差 σ</div><div class="v">{d['sd']:.2f} 元/克</div></div>
     <div class="stat"><div class="k">当前 σ 位置</div><div class="v"><span class="badge {band_cls}">{z:+.2f}σ · {band_txt}</span></div></div>
@@ -598,8 +659,15 @@ def main():
         print("OUT_OF_SESSION 沪金非交易时段，数据暂停更新")
         return 0
     au = fetch_au0_5m()
-    gc = fetch_gc_5m()
-    fx = fetch_cnh_5m()
+    # GC 与 CNH 多源合并：东财历史 ∪ 新浪当日/5分钟（新浪在后，同刻以新浪为准），并回写缓存
+    gc = merge_bars(_load_cache("gc_em.json").get("bars", []) if _load_cache("gc_em.json") else [],
+                    fetch_gc_5m(), fetch_gc_sina_1m())
+    fx = merge_bars(_load_cache("cnh_em.json").get("bars", []) if _load_cache("cnh_em.json") else [],
+                    fetch_cnh_5m(), fetch_cnh_sina_5m())
+    _save_cache("gc_em.json", {"name": "GC merged", "bars": gc})
+    _save_cache("cnh_em.json", {"name": "USDCNH merged", "bars": fx})
+    gc_src = f"em+新浪合并({len(gc)}根)"
+    fx_src = f"em+新浪合并({len(fx)}根)"
     print(f"raw bars: au={len(au)} gc={len(gc)} fx={len(fx)}")
     rows = align(au, gc, fx)
     if not rows:
@@ -622,7 +690,9 @@ def main():
         f"本次新归档 5 分钟样本 {added} 条（data5m/archive_5m.jsonl），逐日沉淀后报告窗口将自动延长。"
     )
     meta = {"rows": rows, "window_start": window_start, "window_end": window_end,
-            "days": days, "bars": len(rows), "ts": ts, "px": stats["cur"]["au"]}
+            "days": days, "bars": len(rows), "ts": ts, "px": stats["cur"]["au"],
+            "stale_min": max(0, int((datetime.datetime.now() - stats["cur"]["dt"]).total_seconds() // 60)),
+            "gc_src": gc_src, "fx_src": fx_src}
 
     # 实时三腿 + ±1.5σ 开仓提示
     rt = fetch_realtime_3leg()
@@ -666,6 +736,7 @@ def main():
                    "min": round(r["min"], 3), "max": round(r["max"], 3),
                    "open": round(r["open"], 3), "close": round(r["close"], 3)} for r in stats["daily"]],
         "archived_new": added,
+        "stale_min": meta["stale_min"],
         "signal": sig,
         "realtime": {"au": rt.get("au"), "gc": rt.get("gc"), "fx": rt.get("fx"),
                      "fx_time": rt.get("fx_time"), "gc_time": rt.get("gc_time")},
