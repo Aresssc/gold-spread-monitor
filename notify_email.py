@@ -33,6 +33,32 @@ def esc(x):
     return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def fmt_val(x, fallback="—"):
+    """Render a scalar safely; None/NaN -> em dash."""
+    if x is None:
+        return fallback
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return fallback
+    if f != f:  # NaN
+        return fallback
+    return f"{f:g}"
+
+
+def fmt_num(x, fallback="—"):
+    """Integer with thousands separator; None/NaN -> em dash."""
+    if x is None:
+        return fallback
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return fallback
+    if f != f:
+        return fallback
+    return f"{int(f):,}"
+
+
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -66,7 +92,7 @@ def build_html(d, prev_spot):
             f'<span style="display:inline-block;margin:3px 4px 3px 0;padding:5px 10px;'
             f'border-radius:8px;font-size:13px;font-weight:600;background:{color}14;'
             f'color:{color};border:1px solid {color}44">'
-            f'{esc(int(float(s)))} <span style="font-weight:400;font-size:11px">{int(float(o)):,} 张</span></span>'
+            f'{fmt_num(s)} <span style="font-weight:400;font-size:11px">{fmt_num(o)} 张</span></span>'
             for s, o in walls.items())
 
     def rec_table(recs, first_strike):
@@ -74,18 +100,20 @@ def build_html(d, prev_spot):
                 "<th>OI</th><th>成交量</th><th>估Δ</th><th>到期</th></tr>")
         rows = []
         for r in recs:
-            cls = ' bgcolor="#fdf3e7"' if int(r["strike"]) == first_strike else ""
+            cls = ' bgcolor="#fdf3e7"' if int(r["strike"] or 0) == first_strike else ""
             rows.append(
-                f"<tr{cls}><td><b>{int(r['strike'])}</b></td>"
-                f"<td>+{r['pct_otm']}%</td><td>{r['mid']}</td><td>{r['bid']}~{r['ask']}</td>"
-                f"<td>{r['oi']:,}</td><td>{r['volume']:,}</td>"
-                f"<td>{r['est_delta']}</td><td>{r['expiry'][5:]}·{r['dte']}天</td></tr>")
+                f"<tr{cls}><td><b>{fmt_num(r['strike'])}</b></td>"
+                f"<td>+{fmt_val(r['pct_otm'])}%</td><td>{fmt_val(r['mid'])}</td>"
+                f"<td>{fmt_val(r['bid'])}~{fmt_val(r['ask'])}</td>"
+                f"<td>{fmt_num(r.get('oi'))}</td><td>{fmt_num(r.get('volume'))}</td>"
+                f"<td>{fmt_val(r['est_delta'])}</td>"
+                f"<td>{str(r['expiry'])[5:]}·{fmt_val(r['dte'])}天</td></tr>")
         return f"<table>{head}{''.join(rows)}</table>"
 
     call_recs = d["recs"]["call"]
     put_recs = d["recs"]["put"]
-    call_first = int(call_recs[0]["strike"]) if call_recs else -1
-    put_first = int(put_recs[0]["strike"]) if put_recs else -1
+    call_first = int(call_recs[0]["strike"] or 0) if call_recs else -1
+    put_first = int(put_recs[0]["strike"] or 0) if put_recs else -1
 
     return f"""<!DOCTYPE html><html><body style="margin:0;padding:0;background:{BG};font-family:-apple-system,'PingFang SC','Helvetica Neue',Arial,sans-serif;color:{INK};">
 <div style="max-width:680px;margin:0 auto;padding:16px;">
@@ -132,8 +160,8 @@ def build_html(d, prev_spot):
 
 
 def plain_fallback(d):
-    call_first = int(d["recs"]["call"][0]["strike"]) if d["recs"]["call"] else "-"
-    put_first = int(d["recs"]["put"][0]["strike"]) if d["recs"]["put"] else "-"
+    call_first = fmt_num(d["recs"]["call"][0]["strike"]) if d["recs"]["call"] else "-"
+    put_first = fmt_num(d["recs"]["put"][0]["strike"]) if d["recs"]["put"] else "-"
     return (f"GLD {d['spot']:.2f} @ {d['generated_at'][:16]}\n"
             f"Call 墙 {d['bands']['call_band']} / Put 墙 {d['bands']['put_band']}\n"
             f"Sell Call 首选 {call_first} / Sell Put 首选 {put_first}\n"
@@ -154,7 +182,12 @@ def main():
         d = json.load(f)
 
     prev = load_state().get("spot")
-    html = build_html(d, prev)
+    try:
+        html = build_html(d, prev)
+    except Exception as e:
+        # never lose a day's report because of a rendering bug
+        print(f"[mail][warn] HTML build failed ({type(e).__name__}: {e}), falling back to plain text")
+        html = None
     save_state(d["spot"])
 
     subj_date = d.get("generated_at", "")[:10]
@@ -167,7 +200,8 @@ def main():
 
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(plain_fallback(d), "plain", "utf-8"))
-    alt.attach(MIMEText(html, "html", "utf-8"))
+    if html:
+        alt.attach(MIMEText(html, "html", "utf-8"))
     msg.attach(alt)
 
     png_path = f"{OUT_DIR}/gld_monitor_oi.png"
