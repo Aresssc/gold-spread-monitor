@@ -2,10 +2,17 @@ name: gold-spread-update
 
 on:
   schedule:
-    # 日盘：北京时间 09:10-14:10 每小时（UTC 01:10-06:10，周一至周五）
-    - cron: "10 1-6 * * 1-5"
-    # 夜盘：北京时间 21:10-次日02:10 每小时（UTC 13:10-18:10，周日至周五）
-    - cron: "10 13-18 * * 0-5"
+    # GitHub 的 schedule 在低活跃公开仓库上会大面积漏触发，故把槽位加密到每 10 分钟。
+    # 脚本自带交易时段守卫，非交易时段的槽位会在 ~10s 内退出，成本可忽略。
+    # 日盘：北京时间 09:00-14:50（UTC 01:00-06:50，周一至周五）
+    - cron: "*/10 1-6 * * 1-5"
+    # 夜盘：北京时间 21:00-次日 02:50（UTC 13:00-18:50，周日至周五）
+    - cron: "*/10 13-18 * * 0-5"
+  # 代码或配置变更时自动跑一次并部署（数据提交走 site/，不在此列，不会自触发循环）
+  push:
+    paths:
+      - "*.py"
+      - ".github/workflows/*.yml"
   workflow_dispatch:
     inputs:
       force:
@@ -25,6 +32,7 @@ concurrency:
 jobs:
   update-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       TZ: Asia/Shanghai
     steps:
@@ -57,6 +65,41 @@ jobs:
           [ -f outputs/gold_spread_strategy.html ] && cp outputs/gold_spread_strategy.html site/strategy.html
           cp outputs/gold_spread_latest.json site/latest.json || true
           cp outputs/gold_spread_5min.json site/micro.json || true
+
+      - name: Freshness summary
+        if: steps.run.outputs.skip != 'true'
+        continue-on-error: true
+        run: |
+          cat > /tmp/freshness.py <<'PYEOF'
+          import json, datetime, os
+
+          def load(p):
+              try:
+                  return json.load(open(p, encoding="utf-8"))
+              except Exception:
+                  return None
+
+          rows = []
+          m = load("outputs/gold_spread_latest.json")
+          if m:
+              rows.append(("监控（日线口径）", f"{m.get('date','')} {m.get('ts','')}", m.get("mode", "")))
+          k = load("outputs/gold_spread_5min.json")
+          if k:
+              w = k.get("window") or {}
+              rows.append(("5 分钟微观", str(k.get("ts", "")),
+                           f"{w.get('start','')}~{w.get('end','')} {w.get('bars','')} 根"))
+              cur = k.get("cur") or {}
+              rows.append(("当前同刻价差", str(cur.get("t", "")),
+                           f"{cur.get('spread') or 0:+.2f} 元/克  z={k.get('z') or 0:+.2f}σ  滞后 {k.get('stale_min','?')} 分"))
+          out = os.environ.get("GITHUB_STEP_SUMMARY")
+          if out and rows:
+              with open(out, "a", encoding="utf-8") as fh:
+                  fh.write("### 本次数据快照\n\n| 项目 | 数据时间 | 说明 |\n|---|---|---|\n")
+                  for r in rows:
+                      fh.write("| " + " | ".join(str(x) for x in r) + " |\n")
+                  fh.write(f"\n运行时刻（北京）：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+          PYEOF
+          python3 /tmp/freshness.py
 
       - name: Commit data archive
         if: steps.run.outputs.skip != 'true'
