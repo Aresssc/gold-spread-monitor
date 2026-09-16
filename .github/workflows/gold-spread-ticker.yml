@@ -1,0 +1,144 @@
+name: gold-spread-ticker
+
+# 【外部节拍器 / chain ticker】
+# 背景：GitHub 原生 schedule 在低活跃公开仓库上会被大面积节流。实测 2026-09-15~16，
+#       即使 cron 已加密到每 10 分钟，27 小时内 schedule 也只落地 5 次（间隔 3.6~11.6 小时）。
+# 方案：不再指望 schedule 产生节拍，改为自建一条「自链」——
+#       本 workflow 先 dispatch update.yml，睡到下一个整 10 分钟，再 dispatch 自己。
+#       GITHUB_TOKEN 触发 workflow_dispatch / repository_dispatch 不受"防递归"限制
+#       （官方文档明确豁免），所以不需要任何外部账号或密钥就能自维持。
+#       被 dispatch 出来的运行是立即排队启动，不走 schedule 通道，因此不吃节流。
+# 状态：
+#       ACTIVE = 交易时段前后（含 6 分钟缓冲）→ 10 分钟一跳，每跳先触发一次数据更新
+#       SOON   = 距下一个时段开始 ≤180 分钟 → 15 分钟一跳空转续链，把链子接到开盘（不触发数据更新）
+#       CLOSED = 其它时间 → 主动断链，交给 schedule 兜底槽位唤醒（断链期间无行情，不需要覆盖）
+# 说明：180 分钟的续链窗口让「午休 11:36→13:24」由链条自己跨过；盘前/夜盘前的长空档则由
+#       15 分钟一跳的 SOON 与 schedule 兜底槽位双路径接力，任一命中即可开好盘。
+# 资源：public 仓库 Actions 分钟数免费不限量；本链条只占交易时段及相关窗口的 runner。
+# 兜底：schedule 槽位只用于"断链后重启"，不求准时；update.yml 自身 schedule 与本文件 push 触发也会顺手重启。
+
+on:
+  workflow_dispatch:
+    inputs:
+      hops:
+        description: "链路已跳数（内部使用，防死循环）"
+        type: string
+        default: "0"
+  schedule:
+    # 兜底唤醒槽位。北京时间 = UTC + 8：
+    #   0-1 UTC  -> 08:01-09:51 北京（日盘开盘前）
+    #   5   UTC  -> 13:00-13:59 北京（午休后 13:30 开盘前）
+    #   12-13 UTC-> 20:01-21:51 北京（夜盘开盘前）
+    #   奇数小时 :23 -> 常规巡检
+    - cron: "1,11,21,31,41,51 0-1 * * 1-5"
+    - cron: "*/10 5 * * 1-5"
+    - cron: "1,11,21,31,41,51 12-13 * * 0-5"
+    - cron: "23 */2 * * *"
+  push:
+    paths:
+      - ".github/workflows/gold-spread-ticker.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: gold-spread-ticker
+  cancel-in-progress: true
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Tick (dispatch update -> sleep -> re-arm)
+        run: |
+          set -u
+          REPO="Aresssc/gold-spread-monitor"
+          API="https://api.github.com/repos/$REPO/actions/workflows"
+          HOPS="${{ github.event.inputs.hops }}"
+          [ -z "$HOPS" ] && HOPS=0
+          echo "hops=$HOPS  now(北京)=$(date '+%F %T %a')"
+
+          dispatch() {  # $1=workflow 文件  $2=payload
+            local code
+            code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$API/$1/dispatches" -d "$2")
+            if [ "$code" = "204" ]; then echo "  dispatch $1 -> 204 ok"; return 0; fi
+            echo "  dispatch $1 -> HTTP $code : $(head -c 300 /tmp/resp.txt)"
+            return 1
+          }
+
+          # ---- 1) 判定当前状态与本次睡眠时长 ----
+          OUT="$(python3 - <<'PY'
+          import datetime as dt
+          from zoneinfo import ZoneInfo
+          TZ = ZoneInfo("Asia/Shanghai")
+
+          def active(t):
+              hm = t.hour * 60 + t.minute
+              wd = t.weekday()  # 0=周一
+              # 与 gold_spread_monitor.shfe_in_session() 对齐，前后各留 6 分钟缓冲
+              day = wd <= 4 and (534 <= hm <= 621 or 624 <= hm <= 696 or 804 <= hm <= 906)
+              night = (wd <= 4 and hm >= 1254) or (wd <= 5 and hm <= 156) or (wd == 6 and hm >= 1254)
+              return day or night
+
+          now = dt.datetime.now(TZ)
+          if active(now):
+              state = "ACTIVE"
+              # 睡到下一个整 10 分钟（至少 30s，避免零睡空转）
+              sec = now.minute * 60 + now.second
+              sleep_s = 600 - (sec % 600)
+              if sleep_s < 30:
+                  sleep_s += 600
+          else:
+              nxt = None
+              for i in range(1, 24 * 60 + 1):
+                  p = now + dt.timedelta(minutes=i)
+                  if active(p):
+                      nxt = p.replace(second=0, microsecond=0)
+                      break
+              delta = (nxt - now).total_seconds() if nxt else 10 ** 9
+              if delta <= 10800:                        # 3 小时内开盘 -> 空转续链
+                  state = "SOON"
+                  sleep_s = min(int(delta) + 20, 900)   # 单跳最多 15 分钟，避免长占 runner
+              else:
+                  state = "CLOSED"
+                  sleep_s = 0
+          print("STATE=" + state)
+          print("SLEEP_S=" + str(sleep_s))
+          PY
+          )"
+          eval "$OUT"
+          echo "state=${STATE:-CLOSED} sleep=${SLEEP_S:-0}s"
+
+          if [ "${STATE:-CLOSED}" = "CLOSED" ]; then
+            echo "非交易时段：本轮断链，等 schedule 兜底槽位唤醒（断链期间无行情，无覆盖缺口）。"
+            exit 0
+          fi
+
+          # ---- 2) 交易时段内：触发一次数据更新（force=false，脚本内守卫自会处理非交易时刻）----
+          if [ "$STATE" = "ACTIVE" ]; then
+            dispatch "update.yml" '{"ref":"main","inputs":{"force":false}}' || true
+          else
+            echo "盘前空转，不触发数据更新。"
+          fi
+
+          # ---- 3) 防死循环：单条链最多 500 跳 ----
+          if [ "$HOPS" -ge 500 ]; then
+            echo "已达最大跳数，主动断链。"
+            exit 0
+          fi
+
+          echo "sleep ${SLEEP_S}s ..."
+          sleep "$SLEEP_S"
+
+          # ---- 4) 自续链 ----
+          dispatch "gold-spread-ticker.yml" "{\"ref\":\"main\",\"inputs\":{\"hops\":\"$((HOPS + 1))\"}}"
+          echo "下一跳已排队，链条继续。"
