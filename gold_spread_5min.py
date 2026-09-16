@@ -26,6 +26,21 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 # 价差窗口：外盘 5 分钟（东财）保留约 1400 根，23 小时盘 ≈ 5 个交易日，是当前可对齐的最长窗口
 LOOKBACK_DAYS = 14
 
+# ---------------------------------------------------------------- 取数健康度阈值
+# 实测口径：东财 5 分钟健康时约 1400~1500 根；新浪 au0 固定 1023 根上限。
+# 已知故障：东财 push2his 会偶发返回 0~510 根的截断序列（GC 腿实测出现 461/501/511），
+# 而新浪的 gc 1 分钟腿只覆盖当天（约 517 根）、cnh 5 分钟腿只覆盖近两天（约 503 根）。
+# 云端每次运行都是全新 checkout，data5m/*.json 缓存被 .gitignore 排除、并不存在，
+# 因此东财腿一旦塌掉，合并结果就只剩新浪那截短序列 → 对齐窗口缩到当天 → 夜盘分档为空
+# → 分层统计取不到 n → 脚本在写 JSON 时抛 KeyError（HTML 已写、JSON 未写，于是半新半旧发布）。
+# 对策：① 短序列拒绝写缓存；② 回退 data5m/archive_5m.jsonl（被 git 跟踪，云端唯一持久源）；
+#       ③ 发布前校验对齐窗口，不达标宁可失败也不静默发布失真统计。
+MIN_EM_BARS = 800        # 东财腿（GC / USDCNH）可接受的最小原始根数
+MIN_AU_BARS = 600        # 新浪 au0 可接受的最小原始根数
+MIN_ALIGN_BARS = 300     # 对齐后样本数下限
+MIN_WINDOW_DAYS = 2      # 对齐窗口最少覆盖的交易日数
+ARCHIVE_CACHE = {"au": "au_sina.json", "gc": "gc_em.json", "fx": "cnh_em.json"}
+
 
 # ---------------------------------------------------------------- 数据抓取
 def _get(url, referer, timeout=40, tries=3, wait=8):
@@ -60,27 +75,37 @@ def _save_cache(name, obj):
 
 
 def fetch_au0_5m():
-    """沪金主力连续 5 分钟（新浪，真实价格；接口固定返回 1023 根 ≈ 10 个交易日）"""
+    """沪金主力连续 5 分钟（新浪，真实价格；接口固定返回 1023 根 ≈ 10 个交易日）
+    返回 (bars, source)，source ∈ {'live','cache','empty'}。"""
     url = ("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_=/"
            "InnerFuturesNewService.getFewMinLine?symbol=au0&type=5")
     t = _get(url, "https://finance.sina.com.cn", tries=3)
     if t and '"d"' in t:
-        arr = json.loads(t[t.index("(") + 1:t.rindex(")")])
+        try:
+            arr = json.loads(t[t.index("(") + 1:t.rindex(")")])
+        except Exception:
+            arr = []
         bars = [{"t": x["d"], "c": float(x["c"])} for x in arr if x.get("c")]
         if bars:
-            _save_cache("au_sina.json", bars)
-            return bars
+            if len(bars) >= MIN_AU_BARS:
+                _save_cache("au_sina.json", bars)
+            else:
+                print(f"WARN au_sina 序列偏短：{len(bars)} 根 < {MIN_AU_BARS}，不写入缓存")
+            return bars, "live"
     cached = _load_cache("au_sina.json")
     if cached:
         if isinstance(cached, dict):
             cached = [{"t": x["d"], "c": float(x["c"])} for x in cached.get("bars", [])]
-        return cached
-    return []
+        return cached, "cache"
+    return [], "empty"
 
 
-def _fetch_em_5m(secid, cache_name):
+def _fetch_em_5m(secid, cache_name, min_bars=MIN_EM_BARS):
     """东方财富 5 分钟（f51 时间, f52 开, f53 收, f54 高, f55 低, f56 量）
-    注意：end 参数按"不含当日"语义处理，必须用未来日期才能取到今天的 K 线。"""
+    注意：end 参数按"不含当日"语义处理，必须用未来日期才能取到今天的 K 线。
+    返回 (bars, source)，source ∈ {'live','cache','empty'}。
+    截断序列（< min_bars）照旧返回给上层做健康度判断，但绝不写入缓存，
+    以免把坏数据固化成"历史"，让下一次运行以为拿到了完整窗口。"""
     beg = (datetime.date.today() - datetime.timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
     url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
            f"&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56"
@@ -96,14 +121,17 @@ def _fetch_em_5m(secid, cache_name):
                 if len(f) >= 3 and f[2]:
                     bars.append({"t": f[0], "c": float(f[2])})
             if bars:
-                _save_cache(cache_name, {"name": d.get("name"), "bars": bars})
-                return bars
+                if len(bars) >= min_bars:
+                    _save_cache(cache_name, {"name": d.get("name"), "bars": bars})
+                else:
+                    print(f"WARN {cache_name} 接口返回被截断的序列：{len(bars)} 根 < {min_bars}，不写入缓存")
+                return bars, "live"
         except Exception:
             pass
     cached = _load_cache(cache_name)
     if cached:
-        return cached.get("bars", [])
-    return []
+        return cached.get("bars", []), "cache"
+    return [], "empty"
 
 
 def fetch_gc_5m():
@@ -122,6 +150,66 @@ def merge_bars(*lists):
             t = b["t"][:16]
             out[t] = {"t": t, "c": float(b["c"])}
     return sorted(out.values(), key=lambda x: x["t"])
+
+
+def load_archive_bars(key):
+    """读取 data5m/archive_5m.jsonl 中某一腿（au/gc/fx）。
+    该文件被 git 跟踪、每次 checkout 都在，是云端唯一跨运行持久的数据源，
+    因此是东财/新浪取数塌掉时唯一真实可用的兜底。"""
+    path = os.path.join(DATA_DIR, "archive_5m.jsonl")
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+                if o.get("k") == key and o.get("t"):
+                    out.append({"t": str(o["t"]), "c": float(o["c"])})
+            except (ValueError, TypeError, KeyError):
+                continue
+    out.sort(key=lambda x: x["t"])
+    return out
+
+
+def guard_leg(name, fetched, min_live, *extra):
+    """单腿健康度守门 → (bars, note)。
+
+    fetched 为取数函数返回的 (bars, source)。live 且长度达标 → 直接采用；
+    否则（返回空 / 截断 / 走了本地缓存）用归档 + 本地缓存兜底，再并入 live 与
+    extra 源的最新增量。这样即使东财腿整段塌掉，对齐窗口也不会缩成"只剩当天"。
+    """
+    live, source = fetched
+    live = live or []
+    if source == "live" and len(live) >= min_live:
+        return merge_bars(live, *extra), f"live {len(live)}"
+
+    print(f"WARN {name} 取数异常：source={source} len={len(live)}（阈值 {min_live}），改用归档兜底")
+    cached = _load_cache(ARCHIVE_CACHE[name])
+    if isinstance(cached, dict):
+        cached = cached.get("bars", [])
+    fb = merge_bars(load_archive_bars(name), cached or [], live, *extra)
+    note = f"archive {len(fb)} (live {len(live)}/{source})"
+    if len(fb) < min_live:
+        print(f"ERROR {name} 归档兜底后仍不足：{len(fb)} 根 < {min_live}")
+    return fb, note
+
+
+def validate_window(rows):
+    """发布前校验对齐窗口：不达标宁可整体失败，也不要静默发布失真统计。"""
+    if len(rows) < MIN_ALIGN_BARS:
+        print(f"ERROR 对齐样本过少：{len(rows)} 根 < {MIN_ALIGN_BARS}，拒绝发布")
+        return False
+    days = sorted({r["date"] for r in rows})
+    if len(days) < MIN_WINDOW_DAYS:
+        print(f"ERROR 对齐窗口仅覆盖 {len(days)} 个交易日 < {MIN_WINDOW_DAYS}，拒绝发布")
+        return False
+    cnt = {n: sum(1 for r in rows if r["sess"] == n) for n in ("日盘", "夜盘")}
+    if min(cnt.values()) == 0:
+        print(f"ERROR 分层样本缺失：{cnt}（窗口 {days[0]}~{days[-1]}），拒绝发布")
+        return False
+    print(f"窗口校验通过：{len(rows)} 根 / {len(days)} 个交易日 / 分层 {cnt}")
+    return True
 
 
 def fetch_gc_sina_1m():
@@ -306,12 +394,16 @@ def build_stats(rows):
         occ[str(k)] = sum(1 for v in sp if abs(v - d["mean"]) <= k * d["sd"]) / len(sp) * 100
 
     # 分层
+    # 注意：sub 可能为空（窗口被截断到只剩单一时段时），describe([]) 返回 {}，
+    # 直接取 s["n"] 会 KeyError —— 这正是历史故障的崩点，故此处显式补默认值。
     sess = {}
     for name in ("日盘", "夜盘"):
-        sub = [r["spread"] for r in rows if r["sess"] == name]
-        s = describe(sub)
-        last_sub = [r for r in rows if r["sess"] == name]
-        s["cur_z"] = round((last_sub[-1]["spread"] - s["mean"]) / s["sd"], 2) if s.get("sd") else None
+        sub = [r for r in rows if r["sess"] == name]
+        s = describe([r["spread"] for r in sub])
+        if s.get("sd"):
+            s["cur_z"] = round((sub[-1]["spread"] - s["mean"]) / s["sd"], 2)
+        else:
+            s["cur_z"] = None
         sess[name] = s
 
     daily = []
@@ -504,6 +596,8 @@ def build_html(stats, meta, note):
             continue
         sess_rows += (f"<tr><td>{name}</td><td>{s['n']}</td><td>{s['mean']:.2f}</td><td>{s['sd']:.2f}</td>"
                       f"<td>{s['min']:.2f} ~ {s['max']:.2f}</td><td>{s['cur_z']:+.2f}σ</td></tr>")
+    if not sess_rows:
+        sess_rows = "<tr><td colspan='6' style='color:#999'>本窗口无分层样本（数据源异常）</td></tr>"
     daily_rows = ""
     for r in stats["daily"]:
         daily_rows += (f"<tr><td>{r['date']}</td><td>{r['n']}</td><td>{r['mean']:.2f}</td>"
@@ -658,20 +752,17 @@ def main():
     if os.environ.get("FORCE_RUN") != "1" and not in_session():
         print("OUT_OF_SESSION 沪金非交易时段，数据暂停更新")
         return 0
-    au = fetch_au0_5m()
-    # GC 与 CNH 多源合并：东财历史 ∪ 新浪当日/5分钟（新浪在后，同刻以新浪为准），并回写缓存
-    gc = merge_bars(_load_cache("gc_em.json").get("bars", []) if _load_cache("gc_em.json") else [],
-                    fetch_gc_5m(), fetch_gc_sina_1m())
-    fx = merge_bars(_load_cache("cnh_em.json").get("bars", []) if _load_cache("cnh_em.json") else [],
-                    fetch_cnh_5m(), fetch_cnh_sina_5m())
+    # 三腿取数 → 健康度守门：短序列/失败一律用归档兜底，避免对齐窗口静默缩水
+    au, au_note = guard_leg("au", fetch_au0_5m(), MIN_AU_BARS)
+    gc, gc_note = guard_leg("gc", fetch_gc_5m(), MIN_EM_BARS, fetch_gc_sina_1m())
+    fx, fx_note = guard_leg("fx", fetch_cnh_5m(), MIN_EM_BARS, fetch_cnh_sina_5m())
     _save_cache("gc_em.json", {"name": "GC merged", "bars": gc})
     _save_cache("cnh_em.json", {"name": "USDCNH merged", "bars": fx})
-    gc_src = f"em+新浪合并({len(gc)}根)"
-    fx_src = f"em+新浪合并({len(fx)}根)"
-    print(f"raw bars: au={len(au)} gc={len(gc)} fx={len(fx)}")
+    gc_src = f"GC {gc_note}"
+    fx_src = f"CNH {fx_note}"
+    print(f"raw bars: au={len(au)}({au_note}) gc={len(gc)}({gc_note}) fx={len(fx)}({fx_note})")
     rows = align(au, gc, fx)
-    if not rows:
-        print("ERROR: 无对齐样本")
+    if not validate_window(rows):
         return 1
     added = append_archive(au, gc, fx)
     stats = build_stats(rows)
@@ -729,8 +820,13 @@ def main():
         "median": round(d["median"], 3), "min": round(d["min"], 3), "max": round(d["max"], 3),
         "z": round(stats["z"], 2), "rank": round(stats["rank"], 1),
         "occ": {k: round(v, 1) for k, v in stats["occ"].items()},
-        "sess": {k: {"n": v["n"], "mean": round(v["mean"], 3), "sd": round(v["sd"], 3),
-                     "min": round(v["min"], 3), "max": round(v["max"], 3), "cur_z": v.get("cur_z")}
+        # 用 .get 取默认值：空分档时 describe([]) 返回 {}，硬取键会 KeyError
+        "sess": {k: {"n": v.get("n", 0),
+                     "mean": round(v.get("mean", 0.0), 3),
+                     "sd": round(v.get("sd", 0.0), 3),
+                     "min": round(v.get("min", 0.0), 3),
+                     "max": round(v.get("max", 0.0), 3),
+                     "cur_z": v.get("cur_z")}
                  for k, v in stats["sess"].items()},
         "daily": [{"date": r["date"], "n": r["n"], "mean": round(r["mean"], 3), "sd": round(r["sd"], 3),
                    "min": round(r["min"], 3), "max": round(r["max"], 3),

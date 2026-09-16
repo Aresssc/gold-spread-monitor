@@ -3,7 +3,8 @@ name: gold-spread-update
 on:
   schedule:
     # GitHub 的 schedule 在低活跃公开仓库上会大面积漏触发，故把槽位加密到每 10 分钟。
-    # 脚本自带交易时段守卫，非交易时段的槽位会在 ~10s 内退出，成本可忽略。
+    # 实测加密无效（通道级节流），主力节拍改由 gold-spread-ticker.yml 自链派发，
+    # 这里的槽位只作断链后的兜底唤醒。脚本自带交易时段守卫，非交易时段 ~10s 退出，成本可忽略。
     # 日盘：北京时间 09:00-14:50（UTC 01:00-06:50，周一至周五）
     - cron: "*/10 1-6 * * 1-5"
     # 夜盘：北京时间 21:00-次日 02:50（UTC 13:00-18:50，周日至周五）
@@ -42,29 +43,124 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 刻意不再用 `|| true` 吞错。
+      # 历史故障：`python3 xxx.py || true` + `cp ... || echo "沿用旧版"` 把异常彻底吞掉，
+      # 于是「HTML 已写、JSON 未写」的半新半旧产物照常发布，Actions 里每一步还都是绿的。
+      # 现在任何一步非零退出 → 本步骤失败 → 后续 refresh / 校验 / 提交 / 部署
+      # 全按默认 if: success() 跳过，站点完整保留上一版，同时把失败暴露在 Actions 里。
       - name: Run pipeline (session-guarded)
         id: run
         env:
           FORCE_RUN: ${{ inputs.force == true && '1' || '0' }}
         run: |
-          OUT=$(python3 gold_spread_monitor.py) || true
-          echo "$OUT"
-          if echo "$OUT" | grep -q "OUT_OF_SESSION"; then
+          python3 gold_spread_monitor.py > /tmp/monitor.log 2>&1 || RC=$?
+          cat /tmp/monitor.log
+          if [ "${RC:-0}" != "0" ]; then
+            echo "::error::gold_spread_monitor.py 退出码 ${RC}，本次不发布"
+            exit 1
+          fi
+          if grep -q "OUT_OF_SESSION" /tmp/monitor.log; then
             echo "沪金非交易时段（或节假日）：本次跳过数据更新"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          python3 gold_spread_5min.py || true
-          python3 paper_tracker.py || true
+
+          python3 gold_spread_5min.py > /tmp/5min.log 2>&1 || RC5=$?
+          cat /tmp/5min.log
+          if [ "${RC5:-0}" != "0" ]; then
+            echo "::error::gold_spread_5min.py 退出码 ${RC5}（取数塌陷或窗口校验不通过），本次不发布"
+            exit 1
+          fi
+
+          python3 paper_tracker.py > /tmp/tracker.log 2>&1 || RCT=$?
+          cat /tmp/tracker.log
+          if [ "${RCT:-0}" != "0" ]; then
+            echo "::error::paper_tracker.py 退出码 ${RCT}，本次不发布"
+            exit 1
+          fi
+
+      # 第二道闸：即使脚本"成功返回"，也强制核对产物自身的数据时间。
+      # 覆盖的场景：脚本因时段边界直接 return 0 而未落盘、或产物是从上一版抄来的。
+      - name: Verify artifact freshness
+        if: steps.run.outputs.skip != 'true'
+        run: |
+          python3 - <<'PYEOF'
+          import json, datetime, sys
+
+          fails = []
+          now = datetime.datetime.now()
+
+
+          def age_minutes(raw, fmts):
+              for fmt in fmts:
+                  try:
+                      return (now - datetime.datetime.strptime(str(raw), fmt)).total_seconds() / 60
+                  except ValueError:
+                      continue
+              return None
+
+
+          def check_5min(path, limit):
+              try:
+                  d = json.load(open(path, encoding="utf-8"))
+              except Exception as e:
+                  fails.append(f"{path} 无法读取：{e}")
+                  return
+              age = age_minutes(d.get("ts"), ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"])
+              if age is None:
+                  fails.append(f"{path} 的 ts 无法解析：{d.get('ts')!r}")
+                  return
+              print(f"{path}: ts={d.get('ts')} 距今 {age:.1f} 分钟（上限 {limit}）")
+              if age > limit:
+                  fails.append(f"{path} 产物陈旧（ts={d.get('ts')}，距今 {age:.1f} 分钟），疑似脚本未真正落盘")
+
+
+          def check_monitor(path, limit):
+              try:
+                  d = json.load(open(path, encoding="utf-8"))
+              except Exception as e:
+                  fails.append(f"{path} 无法读取：{e}")
+                  return
+              raw = f"{d.get('date', '')} {d.get('ts', '')}"
+              age = age_minutes(raw, ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"])
+              if age is None:
+                  fails.append(f"{path} 的 date/ts 无法解析：{raw!r}")
+                  return
+              print(f"{path}: {raw} 距今 {age:.1f} 分钟（上限 {limit}）")
+              if age > limit:
+                  fails.append(f"{path} 产物陈旧（{raw}，距今 {age:.1f} 分钟），疑似脚本未真正落盘")
+
+
+          check_5min("outputs/gold_spread_5min.json", 25)
+          check_monitor("outputs/gold_spread_latest.json", 25)
+
+          if fails:
+              for f in fails:
+                  print("FAIL " + f)
+              sys.exit(1)
+          print("产物新鲜度校验通过：HTML 与 JSON 同属本次运行")
+          PYEOF
 
       - name: Refresh site pages
         if: steps.run.outputs.skip != 'true'
         run: |
-          cp outputs/gold_spread_latest.html site/index.html || echo "index.html 未更新（沿用旧版）"
-          cp outputs/gold_spread_5min.html site/micro.html || echo "micro.html 未更新（沿用旧版）"
-          [ -f outputs/gold_spread_strategy.html ] && cp outputs/gold_spread_strategy.html site/strategy.html || true
-          cp outputs/gold_spread_latest.json site/latest.json || true
-          cp outputs/gold_spread_5min.json site/micro.json || true
+          # 必需产物：陈旧已在上一道闸拦住，这里再确认存在性，缺失即报错退出。
+          # 不再用 `cp ... || echo "沿用旧版"`——旧写法会把上一版文件当成本次产物发出去。
+          set -e
+          for f in gold_spread_latest.html gold_spread_5min.html gold_spread_latest.json gold_spread_5min.json; do
+            if [ ! -f "outputs/$f" ]; then
+              echo "::error::缺少必需产物 outputs/$f，本次不发布"
+              exit 1
+            fi
+          done
+          cp outputs/gold_spread_latest.html site/index.html
+          cp outputs/gold_spread_5min.html site/micro.html
+          cp outputs/gold_spread_latest.json site/latest.json
+          cp outputs/gold_spread_5min.json site/micro.json
+          # 可选产物
+          if [ -f outputs/gold_spread_strategy.html ]; then
+            cp outputs/gold_spread_strategy.html site/strategy.html
+          fi
           echo "站点文件就绪：" && ls -la site/
 
       - name: Freshness summary
