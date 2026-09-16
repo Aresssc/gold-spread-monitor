@@ -60,11 +60,12 @@ jobs:
       - name: Refresh site pages
         if: steps.run.outputs.skip != 'true'
         run: |
-          cp outputs/gold_spread_latest.html site/index.html
-          cp outputs/gold_spread_5min.html site/micro.html
-          [ -f outputs/gold_spread_strategy.html ] && cp outputs/gold_spread_strategy.html site/strategy.html
+          cp outputs/gold_spread_latest.html site/index.html || echo "index.html 未更新（沿用旧版）"
+          cp outputs/gold_spread_5min.html site/micro.html || echo "micro.html 未更新（沿用旧版）"
+          [ -f outputs/gold_spread_strategy.html ] && cp outputs/gold_spread_strategy.html site/strategy.html || true
           cp outputs/gold_spread_latest.json site/latest.json || true
           cp outputs/gold_spread_5min.json site/micro.json || true
+          echo "站点文件就绪：" && ls -la site/
 
       - name: Freshness summary
         if: steps.run.outputs.skip != 'true'
@@ -102,13 +103,20 @@ jobs:
           python3 /tmp/freshness.py
 
       - name: Commit data archive
+        # 归档失败绝不能阻断部署：Pages 用的是工作区里的 site/ 产物，不依赖这次提交。
         if: steps.run.outputs.skip != 'true'
+        continue-on-error: true
         run: |
           git config user.name "Aresssc"
           git config user.email "914364304@qq.com"
           git add -A
           git commit -m "data update $(date '+%F %T %Z')" || echo "no changes"
-          git push
+          for i in 1 2 3 4 5; do
+            git push -q && { echo "push ok (attempt $i)"; break; }
+            echo "push rejected, rebasing and retrying ($i/5)..."
+            git pull --rebase --autostash -q origin main || { git rebase --abort 2>/dev/null || true; }
+            sleep 8
+          done
 
       - uses: actions/configure-pages@v5
         if: steps.run.outputs.skip != 'true'
