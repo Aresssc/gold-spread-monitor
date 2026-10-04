@@ -1,6 +1,6 @@
 {
  "date": "2026-10-04",
- "ts": "2026-10-04 23:31",
+ "ts": "2026-10-04 23:51",
  "window": {
   "start": "2026-09-15",
   "end": "2026-09-30",
@@ -163,8 +163,8 @@
    "close": -0.12
   }
  ],
- "archived_new": 190,
- "stale_min": 6271,
+ "archived_new": 0,
+ "stale_min": 6291,
  "signal": {
   "state": "short_zone",
   "z": 1.92,
