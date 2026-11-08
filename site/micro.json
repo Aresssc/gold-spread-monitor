@@ -1,6 +1,6 @@
 {
  "date": "2026-11-09",
- "ts": "2026-11-09 00:44",
+ "ts": "2026-11-09 00:50",
  "window": {
   "start": "2026-11-02",
   "end": "2026-11-06",
@@ -103,8 +103,8 @@
    "close": 1.244
   }
  ],
- "archived_new": 252,
- "stale_min": 2774,
+ "archived_new": 0,
+ "stale_min": 2780,
  "signal": {
   "state": "neutral",
   "z": 1.48,
